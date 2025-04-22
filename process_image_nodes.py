@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 
 
@@ -29,8 +30,7 @@ class RebuiltVideo:
 
 
 
-import torch
-import torch.nn.functional as F
+
 
 class BoneImageTemporalFixer:
     @classmethod
@@ -67,21 +67,11 @@ class BoneImageTemporalFixer:
             smoothed.append(blended.unsqueeze(0))
 
         result = torch.cat(smoothed, dim=0)  # [T, H, W, C]
-        result = torch.cat(smoothed, dim=0)  # [T, H, W, C]
 
-        # チャネル数確認（Cが1のときのみrepeat）
         if result.shape[-1] == 1:
             result = result.repeat(1, 1, 1, 3)  # [T, H, W, 1] → [T, H, W, 3]
 
-        # [T, H, W, C] → [T, C, H, W]
-        result = result.permute(0, 3, 1, 2)
-
         return (result,)
-
-
-# NODE_DISPLAY_NAME_MAPPINGS = {
-#     "RobustPoseSmoothing": "Robust Pose Smoothing"
-# }
 
 
 
