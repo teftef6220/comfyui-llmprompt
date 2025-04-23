@@ -193,12 +193,6 @@ class GenerateTextWithLLM:
         return (generated_text,)
 
 
-
-
-############
-
-
-
 class Qwen2VL:
 
     def __init__(self):
@@ -293,7 +287,7 @@ class Qwen2VL:
             self.model = model_instance                 
             self.processor = processor  
 
-        if (reload_model == True) or (model_key not in current_qwen2VL_model_cache) or (seed == -1) :
+        if (reload_model == True) or (model_key not in current_qwen2VL_model_cache) :
             print("-------------------------------Reload!!!!!!!!!!!!!!!!")
 
         # if self.processor is None:
@@ -370,7 +364,7 @@ class Qwen2VL:
                         text=[text],
                         images=image_inputs,
                         videos=video_inputs,
-                        fpe = 16.0,
+                        fps = 16.0,
                         padding=True,
                         return_tensors="pt",
                     ).to("cuda")
@@ -459,9 +453,17 @@ class Qwen2VL:
             # 删除临时视频文件
             if video_path is not None and len(video_path) > 0:
                 os.remove(processed_video_path)
+                shutil.rmtree(tmp_dir)
 
 
             if del_model_from_GPU: ## Remove cache from GPU
+                print("===========del model From GPU Memory =============")
+                # if quantization == "8bit" :
+                #     pass
+                # elif  quantization == "4bit" :
+                #     pass
+                # else:
+                #     self.model.to("cpu")
                 del self.model
                 del self.processor
                 torch.cuda.empty_cache()

@@ -43,7 +43,7 @@ class AddPrompt:
     CATEGORY = "MyPromptTest"
 
     def add(self, prompt_1,prompt_2):
-        return prompt_1 +", "+ prompt_2
+        return ((prompt_1 +", "+ prompt_2),)
         
 
 
