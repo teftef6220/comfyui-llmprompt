@@ -29,7 +29,7 @@ The pose keypoint information of the reference image is used to align it to the 
 Origin Reference Pose ↓↓  
 ![Result](assets/slow_pose_gunndum_pose_centercrop.gif)  
 
-Input Image Pose (Target) ↓↓
+Input Image Pose (Target) ↓↓   
 ![Result](assets/Input_Image_Pose.png)  
 
 Use These Two Pose Image and Key Point to Align.
