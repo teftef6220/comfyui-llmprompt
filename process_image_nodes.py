@@ -100,32 +100,40 @@ def compute_scale(input_pose, ref_pose, idx1=2, idx2=5):
         raise ValueError("画像が欠損しているまたは、片方の画像が小さすぎます")
     return sum(scales) / len(scales)
 
-def scale_with_anchor(img_tensor, pose_keypoints, scale_factor, anchor_index=1):
+def scale_with_anchor(
+    img_tensor, pose_keypoints, scale_factor,
+    ref_anchor_target=None, anchor_index=1,
+    input_image_shape=None  # ★追加
+        ):
     """
-    neck基準にスケーリングし、元の neck 座標が保たれるように平行移動も行う。
-    img_tensor: (C, H, W)
-    pose_keypoints: flat list of 75 (BODY_25 format)
+    neck を anchor にしてスケーリングし、任意の位置に合わせて平行移動する。
+    ref_anchor_target を指定すると、そこに合わせる。
     """
     C, H, W = img_tensor.shape
     img_pil = TF.to_pil_image(img_tensor)
 
     keypoints = np.array(pose_keypoints).reshape(-1, 3)
-    anchor = keypoints[anchor_index][:2]  # neckの(x, y)
-    
-    # スケーリング後のサイズ
+    anchor = keypoints[anchor_index][:2]
+
     new_size = (int(W * scale_factor), int(H * scale_factor))
     img_scaled = img_pil.resize(new_size, Image.BICUBIC)
     img_scaled_tensor = TF.to_tensor(img_scaled)
-
-    # neck の新旧位置を使って、画像を平行移動
     new_anchor = anchor * scale_factor
-    shift_x = int(round(anchor[0] - new_anchor[0]))
-    shift_y = int(round(anchor[1] - new_anchor[1]))
 
-    # 出力画像サイズに合わせて空白キャンバスを用意（元サイズ）
+    shift_x = int(round(ref_anchor_target[0] - new_anchor[0])) if ref_anchor_target is not None else int(round(anchor[0] - new_anchor[0]))
+    shift_y = int(round(ref_anchor_target[1] - new_anchor[1])) if ref_anchor_target is not None else int(round(anchor[1] - new_anchor[1]))
+
+    if input_image_shape is not None:
+        input_H, input_W = input_image_shape
+        shift_y += (2*(H - input_H)) ##### ここ本当にあってるか確認が必要 2 倍ずれてるはず
+    
+
+    print(f"anchor={anchor}, new_anchor={new_anchor}, ref_anchor_target={ref_anchor_target}, shift_y={shift_y}")
+
+    # breakpoint()
+
     canvas = torch.zeros((C, H, W), dtype=img_tensor.dtype)
 
-    # コピー範囲の決定（クロップと貼り付け）
     paste_x0 = max(0, shift_x)
     paste_y0 = max(0, shift_y)
     paste_x1 = min(W, new_size[0] + shift_x)
@@ -228,34 +236,27 @@ class AlignPOSE_KEYPOINTToReference:
     FUNCTION = "align"
     CATEGORY = "MyPromptTest"
 
-    def align(self, input_keypoints,input_image, reference_keypoints, reference_images, adjust_scale=True):
+    def align(self, input_keypoints, input_image, reference_keypoints, reference_images, adjust_scale=True):
         input_pose = input_keypoints[0]['people'][0]
         ref_pose_0 = reference_keypoints[0]['people'][0]
 
-
-        # input_image から高さ・幅を取得（1枚 only）
+        # 入力画像のサイズと neck の座標を取得
         if input_image[0].ndim == 3 and input_image[0].shape[0] > 4:
-            input_img = input_image[0].permute(2, 0, 1)  # HWC → CHW
+            input_img = input_image[0].permute(2, 0, 1)
         else:
             input_img = input_image[0]
 
-        _, target_H, target_W = input_img.shape # 出力画像を input image に合わせるために取っておく
-
-        # calc scale
-        scale_factor = 1.0 ## init
-        if adjust_scale:
-            scale_factor = compute_scale(input_pose, ref_pose_0, idx1=2, idx2=5)
-            # scale_factor = compute_scale_old(input_pose, ref_pose_0, idx1=2, idx2=5)
-
+        _, target_H, target_W = input_img.shape
         input_center = extract_pose_center(input_pose)
-        # ref_center = extract_pose_center(ref_pose_scaled)
         ref_center = extract_pose_center(ref_pose_0)
 
         if input_center is None or ref_center is None:
             raise ValueError("中心点の抽出に失敗しました")
 
-        offset = input_center - ref_center
-        dx, dy = int(round(offset[0])), int(round(offset[1]))
+        # スケール係数を計算
+        scale_factor = 1.0
+        if adjust_scale:
+            scale_factor = compute_scale(input_pose, ref_pose_0, idx1=2, idx2=5)
 
         aligned_images = []
         for img in reference_images:
@@ -264,35 +265,36 @@ class AlignPOSE_KEYPOINTToReference:
             elif img.ndim != 3 or img.shape[0] != 3:
                 raise ValueError(f"Unexpected image shape: {img.shape}")
 
+            # neck を input_image の neck に揃えるようにスケーリング＋平行移動
+            ## TODO おかしいよおおおおおおおおおおおおおおおおおおおおおおおおなんで x 方向ずれるんだよ。。。
+            img_aligned = scale_with_anchor(
+                    img,
+                    ref_pose_0["pose_keypoints_2d"],
+                    scale_factor,
+                    ref_anchor_target=input_center,
+                    input_image_shape=(target_H, target_W)
+                )
 
-            # --- Scalaing ---
-            if adjust_scale and scale_factor != 1.0:
-                img = scale_with_anchor(img, ref_pose_0["pose_keypoints_2d"], scale_factor)
+            # 画像を中央に貼る（キャンバスは input_image と同じサイズ）
+            C, H, W = img_aligned.shape
+            shifted = torch.zeros((C, target_H, target_W), dtype=img_aligned.dtype)
 
-            # --- Move in offset  ---
-            C, H, W = img.shape
-            shifted = torch.zeros((C, target_H, target_W), dtype=img.dtype)
+            offset_x = (target_W - W) // 2
+            offset_y = (target_H - H) // 2
 
-            # --- 貼り付け ---
-            x0 = max(0, dx)
-            y0 = max(0, dy)
-            x1 = min(target_W, W + dx)
-            y1 = min(target_H, H + dy)
+            paste_x0 = max(0, offset_x)
+            paste_y0 = max(0, offset_y)
+            paste_x1 = paste_x0 + min(W, target_W)
+            paste_y1 = paste_y0 + min(H, target_H)
 
-            # --- 元画像クロップ ---
-            src_x0 = max(0, -dx)
-            src_y0 = max(0, -dy)
-            src_x1 = src_x0 + (x1 - x0)
-            src_y1 = src_y0 + (y1 - y0)
-
-            shifted[:, y0:y1, x0:x1] = img[:, src_y0:src_y1, src_x0:src_x1]
-            print(f"offset dy: {dy}, paste_y0: {y0}, paste_y1: {y1}, src_y0: {src_y0}, src_y1: {src_y1}")
-            print(f"neck (input): {input_center}, neck (ref): {ref_center}")
+            shifted[:, paste_y0:paste_y1, paste_x0:paste_x1] = img_aligned[:, 0:(paste_y1 - paste_y0), 0:(paste_x1 - paste_x0)]
             aligned_images.append(shifted)
 
-        video_tensor = torch.stack(aligned_images, dim=0)  # (T, C, H, W)
-        aligned_video = video_tensor.permute(0, 2, 3, 1)   # → (T, H, W, C)
+        video_tensor = torch.stack(aligned_images, dim=0)
+        aligned_video = video_tensor.permute(0, 2, 3, 1)
         return (aligned_video,)
+
+
 
 
 NODE_CLASS_MAPPINGS = {
