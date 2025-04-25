@@ -4,7 +4,6 @@ import torchvision.transforms.functional as TF
 import numpy as np
 import cv2
 from PIL import Image
-from torchvision.transforms import InterpolationMode
 
 
 # def extract_pose_center(pose):
@@ -225,69 +224,75 @@ class AlignPOSE_KEYPOINTToReference:
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("aligned_video",)
+    # OUTPUT_IS_LIST = (True, True)
     FUNCTION = "align"
     CATEGORY = "MyPromptTest"
 
-    def align(self, input_keypoints, input_image, reference_keypoints, reference_images, adjust_scale=True):
-        # --- 1. 中心＋スケールの計算（最初のフレームのみ） ---
+    def align(self, input_keypoints,input_image, reference_keypoints, reference_images, adjust_scale=True):
         input_pose = input_keypoints[0]['people'][0]
-        ref_pose0  = reference_keypoints[0]['people'][0]
+        ref_pose_0 = reference_keypoints[0]['people'][0]
 
-        # neck の座標取得
-        def neck_point(p):
-            kp = np.array(p["pose_keypoints_2d"]).reshape(-1,3)
-            return kp[1,:2] if kp[1,2] > 0.1 else None
 
-        input_center = neck_point(input_pose)
-        ref_center   = neck_point(ref_pose0)
+        # input_image から高さ・幅を取得（1枚 only）
+        if input_image[0].ndim == 3 and input_image[0].shape[0] > 4:
+            input_img = input_image[0].permute(2, 0, 1)  # HWC → CHW
+        else:
+            input_img = input_image[0]
+
+        _, target_H, target_W = input_img.shape # 出力画像を input image に合わせるために取っておく
+
+        # calc scale
+        scale_factor = 1.0 ## init
+        if adjust_scale:
+            scale_factor = compute_scale(input_pose, ref_pose_0, idx1=2, idx2=5)
+            # scale_factor = compute_scale_old(input_pose, ref_pose_0, idx1=2, idx2=5)
+
+        input_center = extract_pose_center(input_pose)
+        # ref_center = extract_pose_center(ref_pose_scaled)
+        ref_center = extract_pose_center(ref_pose_0)
+
         if input_center is None or ref_center is None:
             raise ValueError("中心点の抽出に失敗しました")
 
-        # スケール計算（左右肩距離比など、既存 compute_scale を流用）
-        scale = 1.0
-        if adjust_scale:
-            scale = compute_scale(input_pose, ref_pose0, idx1=2, idx2=5)
+        offset = input_center - ref_center
+        dx, dy = int(round(offset[0])), int(round(offset[1]))
 
-        # オフセット計算（スケーリングをネック中心でやるので、ref_center はそのまま使える）
-        dx = float(input_center[0] - ref_center[0])
-        dy = float(input_center[1] - ref_center[1])
-
-        # --- 2. 各フレームに同じ変換を適用 ---
-        # 入力側のサイズを取得しておく
-        # input_image[0] が (C,H,W) の場合と (H,W,C) の場合があるので統一
-        img0 = input_image[0]
-        if img0.ndim == 3 and img0.shape[0] > 4:
-            # HWC -> CHW
-            img0 = img0.permute(2,0,1)
-        _, H_in, W_in = img0.shape
-
-        aligned = []
+        aligned_images = []
         for img in reference_images:
-            # (H,W,C) or (C,H,W) を PIL に
             if img.ndim == 3 and img.shape[0] > 4:
-                img = img.permute(2,0,1)
-            pil = TF.to_pil_image(img)
+                img = img.permute(2, 0, 1)
+            elif img.ndim != 3 or img.shape[0] != 3:
+                raise ValueError(f"Unexpected image shape: {img.shape}")
 
-            # affine 変換：アンカーを中心に scale→translate
-            pil2 = TF.affine(
-                pil,
-                angle=0.0,
-                translate=(int(round(dx)), int(round(dy))),
-                scale=scale,
-                shear=(0.0, 0.0),
-                interpolation=InterpolationMode.BICUBIC,  # resample→interpolation
-                fill=0,                                   # fillcolor→fill
-                center=(ref_center[0], ref_center[1])
-            )
 
-            # 出力を入力サイズにリサイズ（余白は黒になります）
-            pil2 = pil2.resize((W_in, H_in), Image.BICUBIC)
-            t2 = TF.to_tensor(pil2)  # CHW, [0,1]
-            aligned.append(t2)
+            # --- Scalaing ---
+            if adjust_scale and scale_factor != 1.0:
+                img = scale_with_anchor(img, ref_pose_0["pose_keypoints_2d"], scale_factor)
 
-        video = torch.stack(aligned, dim=0)         # (T, C, H, W)
-        video = video.permute(0,2,3,1).contiguous() # → (T, H, W, C)
-        return (video,)
+            # --- Move in offset  ---
+            C, H, W = img.shape
+            shifted = torch.zeros((C, target_H, target_W), dtype=img.dtype)
+
+            # --- 貼り付け ---
+            x0 = max(0, dx)
+            y0 = max(0, dy)
+            x1 = min(target_W, W + dx)
+            y1 = min(target_H, H + dy)
+
+            # --- 元画像クロップ ---
+            src_x0 = max(0, -dx)
+            src_y0 = max(0, -dy)
+            src_x1 = src_x0 + (x1 - x0)
+            src_y1 = src_y0 + (y1 - y0)
+
+            shifted[:, y0:y1, x0:x1] = img[:, src_y0:src_y1, src_x0:src_x1]
+            print(f"offset dy: {dy}, paste_y0: {y0}, paste_y1: {y1}, src_y0: {src_y0}, src_y1: {src_y1}")
+            print(f"neck (input): {input_center}, neck (ref): {ref_center}")
+            aligned_images.append(shifted)
+
+        video_tensor = torch.stack(aligned_images, dim=0)  # (T, C, H, W)
+        aligned_video = video_tensor.permute(0, 2, 3, 1)   # → (T, H, W, C)
+        return (aligned_video,)
 
 
 NODE_CLASS_MAPPINGS = {
