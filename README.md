@@ -34,7 +34,7 @@ Input Image Pose (Target) ↓↓
 
 Use These Two Pose Image and Key Point to Align.
 
-Aligned Image Pose ↓↓
+Aligned Image Pose ↓↓  
 ![Result](assets/Fixed_pose.gif)
 ...
 
