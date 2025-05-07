@@ -166,6 +166,8 @@ class AlignPOSE_KEYPOINTToReference:
                 "reference_images": ("IMAGE", {"forceInputList": True}),
                 "reference_keypoints": ("POSE_KEYPOINT", {"forceInputList": True}),
                 "adjust_scale": ("BOOLEAN", {"default": True}),
+                "custom_resize_scale": ("BOOLEAN", {"default": False}),
+                "custom_scaling_factor": ("FLOAT",{"default": 0.1, "min": 0.05, "max": 100.0})
             }
         }
 
@@ -174,7 +176,7 @@ class AlignPOSE_KEYPOINTToReference:
     FUNCTION = "align"
     CATEGORY = "MyPromptTest"
 
-    def align(self, input_keypoints, input_image, reference_keypoints, reference_images, adjust_scale=True):
+    def align(self, input_keypoints, input_image, reference_keypoints, reference_images, adjust_scale=True, custom_resize_scale = False, custom_scaling_factor = 1.0):
         input_pose = input_keypoints[0]['people'][0]
         ref_pose_0 = reference_keypoints[0]['people'][0]
 
@@ -187,6 +189,9 @@ class AlignPOSE_KEYPOINTToReference:
             raise ValueError("中心点の抽出に失敗しました")
 
         scale_factor = compute_scale(input_pose, ref_pose_0) if adjust_scale else 1.0
+
+        if custom_resize_scale:
+            scale_factor  = scale_factor  * custom_scaling_factor
 
         aligned_images = []
         for ref_img in reference_images:
