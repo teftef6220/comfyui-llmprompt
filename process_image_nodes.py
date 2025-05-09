@@ -1,12 +1,114 @@
 import torch
 import torch.nn.functional as F
-import torchvision.transforms.functional as TF
 import numpy as np
 import cv2
+from torchvision.transforms import functional as TF
 from PIL import Image
+
+# 完全な BODY_25 対応（顔周辺含む）
+# OpenPose BODY_25 準拠の接続リスト
+# https://github.com/lllyasviel/ControlNet/discussions/266
+BODY_EDGES = [
+    (1, 2), (1, 5), (2, 3), (3, 4),
+    (5, 6), (6, 7),
+    (1, 8), (8, 9), (9, 10),
+    (1, 11), (11, 12), (12, 13),
+    (1, 0), (0, 14), (14, 16),
+    (0, 15), (15, 17)
+]
+
+BODY_COLORS = [
+    (153, 0, 0),     # 1–2 Right Shoulderblade
+    (153, 51, 0),    # 1–5 Left Shoulderblade
+    (153, 102, 0),   # 2–3 Right Arm
+    (153, 153, 0),   # 3–4 Right Forearm
+    (102, 153, 0),   # 5–6 Left Arm
+    (51, 153, 0),    # 6–7 Left Forearm
+    (0, 153, 0),     # 1–8 Right Torso
+    (0, 153, 51),    # 8–9 Right Upper Leg
+    (0, 153, 102),   # 9–10 Right Lower Leg
+    (0, 153, 153),   # 1–11 Left Torso
+    (0, 102, 153),   # 11–12 Left Upper Leg
+    (0, 51, 153),    # 12–13 Left Lower Leg
+    (0, 0, 153),     # 1–0 Head
+    (51, 0, 153),    # 0–14 R-Eyebrow
+    (102, 0, 153),   # 14–16 R-Ear
+    (153, 0, 153),   # 0–15 L-Eyebrow
+    (153, 0, 102)    # 15–17 L-Ear
+]
+
+BODY_JOINT_COLORS = [
+    (255,   0,   0),    # 0 - nose
+    (255,  85,   0),    # 1 - neck
+    (255, 170,   0),    # 2 - R shoulder
+    (255, 255,   0),    # 3 - R elbow
+    (170, 255,   0),    # 4 - R wrist
+    (85,  255,   0),    # 5 - L shoulder
+    (0,   255,   0),    # 6 - L elbow
+    (0,   255,  85),    # 7 - L wrist
+    (0,   255, 170),    # 8 - R hip
+    (0,   255, 255),    # 9 - R knee
+    (0,   170, 255),    # 10 - R ankle
+    (0,    85, 255),    # 11 - L hip
+    (0,     0, 255),    # 12 - L knee
+    (85,    0, 255),    # 13 - L ankle
+    (255,   0, 255),    # 14 - R eye
+    (255,   0, 255),    # 15 - L eye
+    (255,   0, 170),    # 16 - R ear
+    (255,   0,  85),    # 17 - L ear
+]
+
+
+HAND_EDGES = [(i, i + 1) for i in range(0, 20) if (i + 1) % 4 != 0] + [(0, i) for i in [1, 5, 9, 13, 17]]
+
+HAND_COLORS = {
+    0: (255, 0, 0),
+    1: (255, 64, 0),
+    2: (255, 128, 0),
+    3: (255, 192, 0),
+    4: (255, 255, 0),
+    5: (192, 255, 0),
+    6: (128, 255, 0),
+    7: (64, 255, 0),
+    8: (0, 255, 0),
+    9: (0, 255, 64),
+    10: (0, 255, 128),
+    11: (0, 255, 192),
+    12: (0, 255, 255),
+    13: (0, 192, 255),
+    14: (0, 128, 255),
+    15: (0, 64, 255),
+    16: (0, 0, 255),
+    17: (64, 0, 255),
+    18: (128, 0, 255),
+    19: (192, 0, 255),
+    20: (255, 0, 255),
+}
+
+
+FACE_CIRCLE_SIZE = 5
+BODY_CIRCLE_SIZE = 10
+HAND_CIRCLE_SIZE = 5
+
+
+
+def get_point(pose, index, key_name="pose_keypoints_2d"):
+    """
+    __get__ function
+    get all keypoints from keypoints dict
+    """
+    kp = pose.get(key_name, [])
+    if not kp or len(kp) < 3 * (index + 1):
+        return None
+    x, y, conf = kp[3 * index:3 * index + 3]
+    return np.array([x, y]) if conf > 0.1 else None
 
 
 def extract_pose_center(pose):
+    """
+    calcurate pose center
+    Use neck
+    """
     keypoints = pose.get("pose_keypoints_2d", [])
     if not keypoints or len(keypoints) < 3:
         return None
@@ -15,40 +117,28 @@ def extract_pose_center(pose):
     return neck[:2] if neck[2] > 0.1 else None
 
 
-def get_point(pose, index):
-    kp = pose.get("pose_keypoints_2d", [])
-    if not kp or len(kp) < 3 * (index + 1):
-        return None
-    x, y, conf = kp[3 * index:3 * index + 3]
-    return np.array([x, y]) if conf > 0.1 else None
-
-
-def compute_scale(input_pose, ref_pose, idx1=2, idx2=5):
-    """例: idx1=2(R-Shoulder), idx2=5(L-Shoulder)
-
-    型の欠損に頑健な設計に改造した
-    片方の肩が欠損している場合
-    - 右肩が欠損している場合 : 左肩のスケールのみを使用して結果を返す
-    - 左肩が欠損している場合 : 右肩のスケールのみを使用して結果を返す
-    - 両肩が欠損している場合 : デフォルト値 `1.0` を返す
-    ]"""
+def compute_scale(input_pose, control_pose, idx1=2, idx2=5):
+    """
+    calcurate sacele 
+    The scale is automatically calculated using the shoulder width at each end of the neck.
+    """
     neck_idx = 1
 
     def length(p1, p2):
         return np.linalg.norm(p1 - p2)
 
-    def safe_scale(p_neck_input, p_shoulder_input, p_neck_ref, p_shoulder_ref):
-        if any(p is None for p in [p_neck_input, p_shoulder_input, p_neck_ref, p_shoulder_ref]):
+    def safe_scale(p_neck_input, p_shoulder_input, p_neck_control, p_shoulder_control):
+        if any(p is None for p in [p_neck_input, p_shoulder_input, p_neck_control, p_shoulder_control]):
             return None
         len_input = length(p_neck_input, p_shoulder_input)
-        len_ref = length(p_neck_ref, p_shoulder_ref)
-        return len_input / len_ref if len_ref > 1e-5 else None
+        len_control = length(p_neck_control, p_shoulder_control)
+        return len_input / len_control if len_control > 1e-5 else None
 
     p_neck_input = get_point(input_pose, neck_idx)
-    p_neck_ref = get_point(ref_pose, neck_idx)
+    p_neck_control = get_point(control_pose, neck_idx)
 
-    scale_r = safe_scale(p_neck_input, get_point(input_pose, idx1), p_neck_ref, get_point(ref_pose, idx1))
-    scale_l = safe_scale(p_neck_input, get_point(input_pose, idx2), p_neck_ref, get_point(ref_pose, idx2))
+    scale_r = safe_scale(p_neck_input, get_point(input_pose, idx1), p_neck_control, get_point(control_pose, idx1))
+    scale_l = safe_scale(p_neck_input, get_point(input_pose, idx2), p_neck_control, get_point(control_pose, idx2))
 
     scales = [s for s in [scale_r, scale_l] if s is not None]
     if not scales:
@@ -56,59 +146,253 @@ def compute_scale(input_pose, ref_pose, idx1=2, idx2=5):
     return sum(scales) / len(scales)
 
 
-def scale_with_anchor(img_tensor, pose_keypoints, scale_factor, ref_anchor_target, anchor_index=1):
+def render_pose_only(pose_kps, hand_l_kps=None, hand_r_kps=None, size=(768, 576)):
+    """
+    Reenderer forbody and hands
+    """
+    img = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+
+    # ======== BODY ==========
+    if pose_kps:
+        kps = np.array(pose_kps).reshape(-1, 3)
+        for idx, (i, j) in enumerate(BODY_EDGES):
+            if kps[i][2] > 0.1 and kps[j][2] > 0.1:
+                pt1 = kps[i][:2].astype(np.int32)
+                pt2 = kps[j][:2].astype(np.int32)
+                color = BODY_COLORS[idx % len(BODY_COLORS)]
+
+                center = ((pt1 + pt2) // 2).astype(int)
+                length = int(np.linalg.norm(pt1 - pt2))
+                angle = np.degrees(np.arctan2(pt2[1] - pt1[1], pt2[0] - pt1[0]))
+                axes = (max(length // 2, 1), 8)
+
+                cv2.ellipse(img, tuple(center), axes, angle, 0, 360, color, -1, lineType=cv2.LINE_AA)
+                cv2.circle(img, tuple(pt1), BODY_CIRCLE_SIZE, BODY_JOINT_COLORS[i], -1)
+                cv2.circle(img, tuple(pt2), BODY_CIRCLE_SIZE, BODY_JOINT_COLORS[j], -1)
+
+    # ======== HANDS ========== None なら
+    def draw_hand(hand_kps, hand_side):
+        hand = np.array(hand_kps).reshape(-1, 3)
+        for i, j in HAND_EDGES:
+            if hand[i][2] > 0.1 and hand[j][2] > 0.1:
+                pt1 = hand[i][:2].astype(np.int32)
+                pt2 = hand[j][:2].astype(np.int32)
+
+                center = ((pt1 + pt2) // 2).astype(int)
+                length = int(np.linalg.norm(pt1 - pt2))
+                angle = np.degrees(np.arctan2(pt2[1] - pt1[1], pt2[0] - pt1[0]))
+                axes = (max(length // 2, 1), 5)
+
+                # 左右でボーンの色を分ける（例えば）
+                color = HAND_COLORS.get(i, (255, 255, 255))  # デフォルト白
+                joint_color = (0, 0, 255)  # 全ジョイント青で統一
+
+                cv2.ellipse(img, tuple(center), axes, angle, 0, 360, color, -1, lineType=cv2.LINE_AA)
+                cv2.circle(img, tuple(pt1), HAND_CIRCLE_SIZE, joint_color, -1)
+                cv2.circle(img, tuple(pt2), HAND_CIRCLE_SIZE, joint_color, -1)
+
+    if hand_l_kps is not None:
+        draw_hand(hand_l_kps, "left")
+    if hand_r_kps is not None:
+        draw_hand(hand_r_kps, "right")
+
+    return TF.to_tensor(Image.fromarray(img))
+
+
+def render_face_only(face_kps, size=(768, 576)):
+    """
+    Reenderer for face
+    """
+    img = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+    if face_kps:
+        pts = np.array(face_kps).reshape(-1, 3)
+        for x, y, c in pts:
+            if c > 0.1:
+                cv2.circle(img, (int(x), int(y)), FACE_CIRCLE_SIZE, (255, 255, 255), -1)
+    return TF.to_tensor(Image.fromarray(img))
+
+
+def scale_with_anchor(img_tensor, keypoints, scale_factor, control_anchor_target=None, anchor_index=None, return_shift=False, override_shift=None, custom_anchor=None):
+    """
+    Resize body image with anchor 0 : "neck"
+    """
     C, H, W = img_tensor.shape
+    keypoints = np.array(keypoints).reshape(-1, 3)
 
-    keypoints = np.array(pose_keypoints).reshape(-1, 3)
-    anchor = keypoints[anchor_index][:2]
+    # アンカーの決定
+    if custom_anchor is not None:
+        anchor = custom_anchor
+    elif anchor_index is not None and keypoints[anchor_index][2] > 0.1:
+        anchor = keypoints[anchor_index][:2]
+    else:
+        return (torch.zeros_like(img_tensor), np.array([0, 0])) if return_shift else torch.zeros_like(img_tensor)
+
     new_H, new_W = int(H * scale_factor), int(W * scale_factor)
-    new_size = (new_H, new_W)
-
-    # torchでリサイズ
-    img_tensor_unsq = img_tensor.unsqueeze(0)  # [1, C, H, W]
-    img_scaled_tensor = F.interpolate(img_tensor_unsq, size=new_size, mode="bicubic", align_corners=False)
-    img_scaled_tensor = img_scaled_tensor[0]  # [C, H, W]
+    img_scaled_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(new_H, new_W), mode="bicubic", align_corners=False)[0]
 
     new_anchor = anchor * scale_factor
-    shift = (ref_anchor_target - new_anchor).astype(int)
 
+    # shift の決定
+    if override_shift is not None:
+        shift = np.array(override_shift).astype(int)
+    elif control_anchor_target is not None:
+        shift = (control_anchor_target - new_anchor).astype(int)
+    else:
+        shift = np.array([0, 0])
+
+    # 貼り付け処理
     canvas = torch.zeros((C, H, W), dtype=img_tensor.dtype)
-
     paste_x0 = max(0, shift[0])
     paste_y0 = max(0, shift[1])
     crop_x0 = max(0, -shift[0])
     crop_y0 = max(0, -shift[1])
-
     paste_h = min(H - paste_y0, img_scaled_tensor.shape[1] - crop_y0)
     paste_w = min(W - paste_x0, img_scaled_tensor.shape[2] - crop_x0)
 
     canvas[:, paste_y0:paste_y0+paste_h, paste_x0:paste_x0+paste_w] = \
         img_scaled_tensor[:, crop_y0:crop_y0+paste_h, crop_x0:crop_x0+paste_w]
+
+    return (canvas, shift) if return_shift else canvas
+
+def custom_scale_around_anchor(tensor, anchor, scale_factor):
+    """
+    Resize face image with anchor 30 : "nose"
+    """
+    # アンカーの決定
+    C, H, W = tensor.shape
+    new_H, new_W = int(H * scale_factor), int(W * scale_factor)
+    tensor_scaled = F.interpolate(tensor.unsqueeze(0), size=(new_H, new_W), mode="bicubic", align_corners=False)[0]
+
+    new_anchor = anchor * scale_factor
+
+    # shift の決定
+    shift = (anchor - new_anchor).astype(int)
+
+    # 拡大後サイズで canvas を確保（貼り付け切れを防ぐ）
+    canvas = torch.zeros((C, H, W), dtype=tensor.dtype)
+
+    paste_x0 = max(0, shift[0])
+    paste_y0 = max(0, shift[1])
+    crop_x0 = max(0, -shift[0])
+    crop_y0 = max(0, -shift[1])
+    paste_h = min(H - paste_y0, tensor_scaled.shape[1] - crop_y0)
+    paste_w = min(W - paste_x0, tensor_scaled.shape[2] - crop_x0)
+
+    # 貼り付け処理
+    if paste_h > 0 and paste_w > 0:
+        canvas[:, paste_y0:paste_y0+paste_h, paste_x0:paste_x0+paste_w] = \
+            tensor_scaled[:, crop_y0:crop_y0+paste_h, crop_x0:crop_x0+paste_w]
+
     return canvas
 
-class RebuiltVideo:
+
+
+
+class AlignPOSE_KEYPOINTToReference:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "repeat_each_frame": ("INT", {"default": 3, "min": 1, "max": 100}),
+                "input_image": ("IMAGE", {"forceInputList": True}),
+                "input_keypoints": ("POSE_KEYPOINT",),
+                "control_images": ("IMAGE", {"forceInputList": True}),
+                "control_keypoints": ("POSE_KEYPOINT", {"forceInputList": True}),
+                "adjust_scale": ("BOOLEAN", {"default": True}),
+                "custom_resize_scale": ("BOOLEAN", {"default": False}),
+                "custom_scaling_factor": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 100.0}),
+                "adjust_face_scale":("BOOLEAN", {"default": True}),
+                "face_scaling_factor": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 100.0}),
+                "use_person_input_image": ("INT", {"default": 1, "min": 1, "max": 10}), # n 番目の人間のポーズを使用する
+                "use_person_control_image": ("INT", {"default": 1, "min": 1, "max": 10}), # n 番目の人間のポーズを使用する
+                "draw_hands":("BOOLEAN", {"default": True}),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT",)
-    RETURN_NAMES = ("IMAGE", "width", "height",)
-    FUNCTION = "rebuilt"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("aligned_video",)
+    FUNCTION = "align"
     CATEGORY = "MyPromptTest"
 
-    def rebuilt(self, image, repeat_each_frame):
-        # image: [B, H, W, C] (B = number of frames)
-        B, H, W, C = image.shape
+    def align(self, input_keypoints, input_image, control_keypoints, control_images, 
+              adjust_scale=True,custom_resize_scale=False, custom_scaling_factor=1.0, 
+              adjust_face_scale=True, face_scaling_factor=1.0, use_person_input_image=1,use_person_control_image=1,draw_hands=True):
+        
+        try:
+            input_pose = input_keypoints[0]['people'][use_person_input_image - 1]
+        except IndexError:
+            raise ValueError(f"input_keypoints の 'people' に {use_person_input_image} 番目の人物が存在しません。")
+        try:
+            first_frame_control_pose = control_keypoints[0]['people'][use_person_control_image - 1]
+        except IndexError:
+            raise ValueError(f"control_keypoints の 'people' に {use_person_control_image} 番目の人物が存在しません。")
 
-        # 複製用テンソル作成: repeat along batch/frame dimension
-        image_expanded = image.repeat_interleave(repeat_each_frame, dim=0)
+        # if input_pose is None :
+        #      raise ValueError("input_keypoints に有効な人物が含まれていません。")  
+        # elif first_frame_control_pose is None:
+        #     raise ValueError("control_keypoints に有効な人物が含まれていません。")
 
-        return image_expanded, W, H
+        input_img = input_image[0].permute(2, 0, 1) if input_image[0].ndim == 3 else input_image[0]
+        _, target_H, target_W = input_img.shape
+
+        # Extract pose center
+        input_center = extract_pose_center(input_pose)
+        control_center = extract_pose_center(first_frame_control_pose)
+        if input_center is None or control_center is None:
+            raise ValueError("中心点の抽出に失敗しました")
+
+        scale_factor = compute_scale(input_pose, first_frame_control_pose) if adjust_scale else 1.0
+        if custom_resize_scale:
+            scale_factor *= custom_scaling_factor
+
+        aligned_images = []
+        for i, control_img in enumerate(control_images):
+            control_pose = control_keypoints[i]['people'][use_person_control_image - 1]
+
+            face_key = control_pose.get("face_keypoints_2d", [])
+            if draw_hands:
+                hand_l_key = control_pose.get("hand_left_keypoints_2d", [])
+                hand_r_key = control_pose.get("hand_right_keypoints_2d", [])
+            else:
+                hand_l_key,hand_r_key = None,None
+            pose_key = control_pose.get("pose_keypoints_2d", [])
+
+            body_tensor_raw = render_pose_only(pose_key, hand_l_key, hand_r_key, size=(target_W, target_H))
+            face_tensor_raw = render_face_only(face_key, size=(target_W, target_H))
+
+
+            # ==== 体をスケール・シフトで整列 ====
+            body_tensor, body_shift = scale_with_anchor(
+                body_tensor_raw, pose_key,
+                scale_factor, control_anchor_target=input_center,
+                anchor_index=1, return_shift=True
+            )
+
+            # ==== 顔を体と同じスケール・シフトで整列 ====
+            face_tensor_base, _ = scale_with_anchor(
+                face_tensor_raw, face_key,
+                scale_factor, override_shift=body_shift,
+                anchor_index=1, return_shift=True  # anchor_indexはdummyでもOK
+            )
+
+            # ==== アンカーポイントを鼻にして顔だけスケール ====
+            face_anchor = get_point(control_pose, 30, key_name="face_keypoints_2d")
+
+            if  adjust_face_scale:
+                if face_anchor is not None :
+                    anchor = face_anchor * scale_factor + body_shift # ← 鼻の位置を計算するためにbody 分のシフトが必要
+                    face_tensor = custom_scale_around_anchor(face_tensor_base, anchor, face_scaling_factor)
+                else:
+                    raise ValueError("controlerence Image の顔に検出可能なキーポイントがありません")
+            else:
+                face_tensor = face_tensor_base
+
+
+            composed = torch.clamp(body_tensor + face_tensor, 0, 1)
+            aligned_images.append(composed)
+
+        video_tensor = torch.stack(aligned_images, dim=0).permute(0, 2, 3, 1)
+        return (video_tensor,)
+
 
 
 class BoneImageTemporalFixer:
@@ -155,56 +439,34 @@ class BoneImageTemporalFixer:
 
         return (result,)
 
-
-class AlignPOSE_KEYPOINTToReference:
+class RebuiltVideo:
+    """
+    ポスタリゼーション時間と同様の効果
+    各フレームを n 毎複製することで n 倍の長さの動画（Tensor）にするコード
+    """
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "input_image": ("IMAGE", {"forceInputList": True}),
-                "input_keypoints": ("POSE_KEYPOINT",),
-                "reference_images": ("IMAGE", {"forceInputList": True}),
-                "reference_keypoints": ("POSE_KEYPOINT", {"forceInputList": True}),
-                "adjust_scale": ("BOOLEAN", {"default": True}),
-                "custom_resize_scale": ("BOOLEAN", {"default": False}),
-                "custom_scaling_factor": ("FLOAT",{"default": 0.1, "min": 0.05, "max": 100.0})
+                "image": ("IMAGE",),
+                "repeat_each_frame": ("INT", {"default": 3, "min": 1, "max": 100}),
             }
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("aligned_video",)
-    FUNCTION = "align"
+    RETURN_TYPES = ("IMAGE", "INT", "INT",)
+    RETURN_NAMES = ("IMAGE", "width", "height",)
+    FUNCTION = "rebuilt"
     CATEGORY = "MyPromptTest"
 
-    def align(self, input_keypoints, input_image, reference_keypoints, reference_images, adjust_scale=True, custom_resize_scale = False, custom_scaling_factor = 1.0):
-        input_pose = input_keypoints[0]['people'][0]
-        ref_pose_0 = reference_keypoints[0]['people'][0]
+    def rebuilt(self, image, repeat_each_frame):
+        # image: [B, H, W, C] (B = number of frames)
+        B, H, W, C = image.shape
 
-        input_img = input_image[0].permute(2, 0, 1) if input_image[0].ndim == 3 else input_image[0]
-        _, target_H, target_W = input_img.shape
+        # 複製用テンソル作成: repeat along batch/frame dimension
+        image_expanded = image.repeat_interleave(repeat_each_frame, dim=0)
 
-        input_center = extract_pose_center(input_pose)
-        ref_center = extract_pose_center(ref_pose_0)
-        if input_center is None or ref_center is None:
-            raise ValueError("中心点の抽出に失敗しました")
-
-        scale_factor = compute_scale(input_pose, ref_pose_0) if adjust_scale else 1.0
-
-        if custom_resize_scale:
-            scale_factor  = scale_factor  * custom_scaling_factor
-
-        aligned_images = []
-        for ref_img in reference_images:
-            img_tensor = ref_img.permute(2, 0, 1) if ref_img.ndim == 3 else ref_img
-            aligned = scale_with_anchor(img_tensor, ref_pose_0["pose_keypoints_2d"], scale_factor, input_center)
-            aligned_images.append(aligned)
-
-        video_tensor = torch.stack(aligned_images, dim=0).permute(0, 2, 3, 1)
-        return (video_tensor,)
-
-
-
-
+        return image_expanded, W, H
+    
 NODE_CLASS_MAPPINGS = {
     "Rebuilt_Video": RebuiltVideo,
     "BoneImageTemporalFixer": BoneImageTemporalFixer,
