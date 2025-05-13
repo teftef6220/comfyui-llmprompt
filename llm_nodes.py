@@ -272,8 +272,11 @@ class Qwen2VL:
         model_id = f"qwen/{model}"
         # put downloaded model to model/LLM dir
 
+        for i in range(len(folder_paths.get_folder_paths("LLM"))):
+            if os.path.exists(folder_paths.get_folder_paths("LLM")[i]):
+                self.model_checkpoint = os.path.join(folder_paths.get_folder_paths("LLM")[i],model)
+                break
 
-        self.model_checkpoint = os.path.join(folder_paths.get_folder_paths("LLM")[0],model)
 
         if not os.path.exists(self.model_checkpoint):
             warnings.warn("No model checkpoint found.")

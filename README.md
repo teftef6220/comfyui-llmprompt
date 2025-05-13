@@ -4,7 +4,7 @@
 Qwen7B を用いた V2T, I2T を自動で行うカスタムノード
 
 Add LLM Save Dir   
-```mkdir /mnt/blue1/cho/SD_Models/models/LLM/```
+```mkdir /LLM/```
 
 And write it in extra_model_pathes.yaml
 
