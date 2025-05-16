@@ -4,6 +4,7 @@ import numpy as np
 import cv2
 from torchvision.transforms import functional as TF
 from PIL import Image
+import random
 
 # 完全な BODY_25 対応（顔周辺含む）
 # OpenPose BODY_25 準拠の接続リスト
@@ -316,6 +317,9 @@ class AlignPOSE_KEYPOINTToReference:
     def align(self, input_keypoints, input_image, control_keypoints, control_images, 
               adjust_scale=True,custom_resize_scale=False, custom_scaling_factor=1.0, 
               adjust_face_scale=True, face_scaling_factor=1.0, use_person_input_image=1,use_person_control_image=1,draw_hands=True):
+
+        if not adjust_scale:
+            return (input_image,) 
         
         try:
             input_pose = input_keypoints[0]['people'][use_person_input_image - 1]
@@ -466,11 +470,55 @@ class RebuiltVideo:
         image_expanded = image.repeat_interleave(repeat_each_frame, dim=0)
 
         return image_expanded, W, H
-    
+
+class MakeBlackoutFrame:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_tensor": ("IMAGE",),
+                "blackout_ratio": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                "num_blocks": ("INT", {"default": 3, "min": 1, "max": 100}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "blackout"
+
+    CATEGORY = "custom/video"
+
+    def blackout(self, video_tensor, blackout_ratio, num_blocks):
+        """
+        video_tensor: torch.Tensor of shape (T, H, W, C) with float values in [0, 1]
+        """
+
+        T, H, W, C = video_tensor.shape
+        total_blackout_frames = int((T - 1) * blackout_ratio)
+        block_length = max(1, total_blackout_frames // num_blocks)
+
+        candidate_indices = list(range(1, T))  # keep frame 0 visible if desired
+        blackout_indices = set()
+        tried_starts = set()
+
+        while len(blackout_indices) < total_blackout_frames and len(tried_starts) < len(candidate_indices):
+            start = random.choice(candidate_indices)
+            if start in tried_starts:
+                continue
+            tried_starts.add(start)
+            block = list(range(start, min(start + block_length, T)))
+            blackout_indices.update(block)
+
+        blackout_tensor = video_tensor.clone()
+        for i in blackout_indices:
+            blackout_tensor[i] = torch.zeros((H, W, C), dtype=video_tensor.dtype, device=video_tensor.device)
+
+        return (blackout_tensor,)
+
 NODE_CLASS_MAPPINGS = {
     "Rebuilt_Video": RebuiltVideo,
     "BoneImageTemporalFixer": BoneImageTemporalFixer,
     "AlignPOSE_KEYPOINTToReference": AlignPOSE_KEYPOINTToReference,
+    "MakeBlackoutFrame": MakeBlackoutFrame,
 }
 
 
