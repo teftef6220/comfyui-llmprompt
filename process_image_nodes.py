@@ -325,10 +325,16 @@ class AlignPOSE_KEYPOINTToReference:
             input_pose = input_keypoints[0]['people'][use_person_input_image - 1]
         except IndexError:
             raise ValueError(f"input_keypoints の 'people' に {use_person_input_image} 番目の人物が存在しません。")
-        try:
-            first_frame_control_pose = control_keypoints[0]['people'][use_person_control_image - 1]
-        except IndexError:
-            raise ValueError(f"control_keypoints の 'people' に {use_person_control_image} 番目の人物が存在しません。")
+        
+        first_frame_control_pose = None
+        for frame_keypoints in control_keypoints:
+            people = frame_keypoints.get("people", [])
+            if len(people) >= use_person_control_image:
+                first_frame_control_pose = people[use_person_control_image - 1]
+                break
+
+        if first_frame_control_pose is None:
+            raise ValueError("control_keypoints に有効な人物が含まれるフレームが見つかりませんでした。")
 
         # if input_pose is None :
         #      raise ValueError("input_keypoints に有効な人物が含まれていません。")  
@@ -350,49 +356,62 @@ class AlignPOSE_KEYPOINTToReference:
 
         aligned_images = []
         for i, control_img in enumerate(control_images):
-            control_pose = control_keypoints[i]['people'][use_person_control_image - 1]
+            people = control_keypoints[i].get('people', [])
+            if len(people) < use_person_control_image:
+                print(f"[Warning] フレーム {i} に {use_person_control_image} 番目の人物が検出されていません。スキップします。")
+                continue
+
+            control_pose = people[use_person_control_image - 1]
 
             face_key = control_pose.get("face_keypoints_2d", [])
             if draw_hands:
                 hand_l_key = control_pose.get("hand_left_keypoints_2d", [])
                 hand_r_key = control_pose.get("hand_right_keypoints_2d", [])
             else:
-                hand_l_key,hand_r_key = None,None
+                hand_l_key, hand_r_key = None, None
             pose_key = control_pose.get("pose_keypoints_2d", [])
+
+            # キーポイントが有効でない場合スキップ
+            if not pose_key or not face_key:
+                print(f"[Warning] フレーム {i} に有効なキーポイントが存在しません。スキップします。")
+                continue
 
             body_tensor_raw = render_pose_only(pose_key, hand_l_key, hand_r_key, size=(target_W, target_H))
             face_tensor_raw = render_face_only(face_key, size=(target_W, target_H))
 
+            try:
+                # ==== 体をスケール・シフトで整列 ====
+                body_tensor, body_shift = scale_with_anchor(
+                    body_tensor_raw, pose_key,
+                    scale_factor, control_anchor_target=input_center,
+                    anchor_index=1, return_shift=True
+                )
 
-            # ==== 体をスケール・シフトで整列 ====
-            body_tensor, body_shift = scale_with_anchor(
-                body_tensor_raw, pose_key,
-                scale_factor, control_anchor_target=input_center,
-                anchor_index=1, return_shift=True
-            )
+                # ==== 顔を体と同じスケール・シフトで整列 ====
+                face_tensor_base, _ = scale_with_anchor(
+                    face_tensor_raw, face_key,
+                    scale_factor, override_shift=body_shift,
+                    anchor_index=1, return_shift=True
+                )
 
-            # ==== 顔を体と同じスケール・シフトで整列 ====
-            face_tensor_base, _ = scale_with_anchor(
-                face_tensor_raw, face_key,
-                scale_factor, override_shift=body_shift,
-                anchor_index=1, return_shift=True  # anchor_indexはdummyでもOK
-            )
-
-            # ==== アンカーポイントを鼻にして顔だけスケール ====
-            face_anchor = get_point(control_pose, 30, key_name="face_keypoints_2d")
-
-            if  adjust_face_scale:
-                if face_anchor is not None :
-                    anchor = face_anchor * scale_factor + body_shift # ← 鼻の位置を計算するためにbody 分のシフトが必要
-                    face_tensor = custom_scale_around_anchor(face_tensor_base, anchor, face_scaling_factor)
+                # ==== 鼻キーポイントを基準に顔だけスケール ====
+                face_anchor = get_point(control_pose, 30, key_name="face_keypoints_2d")
+                if adjust_face_scale:
+                    if face_anchor is not None:
+                        anchor = face_anchor * scale_factor + body_shift
+                        face_tensor = custom_scale_around_anchor(face_tensor_base, anchor, face_scaling_factor)
+                    else:
+                        print(f"[Warning] フレーム {i} に鼻のキーポイントがありません。スキップします。")
+                        continue
                 else:
-                    raise ValueError("controlerence Image の顔に検出可能なキーポイントがありません")
-            else:
-                face_tensor = face_tensor_base
+                    face_tensor = face_tensor_base
 
+                composed = torch.clamp(body_tensor + face_tensor, 0, 1)
+                aligned_images.append(composed)
 
-            composed = torch.clamp(body_tensor + face_tensor, 0, 1)
-            aligned_images.append(composed)
+            except Exception as e:
+                print(f"[Warning] フレーム {i} の処理中にエラーが発生しました: {e}")
+                continue
 
         video_tensor = torch.stack(aligned_images, dim=0).permute(0, 2, 3, 1)
         return (video_tensor,)

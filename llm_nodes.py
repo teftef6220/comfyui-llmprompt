@@ -327,7 +327,8 @@ class Qwen2VL:
                 torch_dtype=torch.bfloat16 if self.bf16_support else torch.float16,
                 device_map="auto",
                 quantization_config=quantization_config,
-                local_files_only=True
+                local_files_only=True,
+                attn_implementation="eager",
             )
 
             # キャッシュ
