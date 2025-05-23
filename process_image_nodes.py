@@ -288,9 +288,18 @@ def custom_scale_around_anchor(tensor, anchor,w_factor =1.0, h_factor=1.0):
     return canvas
 
 
-
-
 class AlignPOSE_KEYPOINTToReference:
+    """
+    参照画像のポーズと入力画像のポーズを整列させるノード
+    1. 入力画像のポーズを参照画像のポーズに合わせてスケール・シフト
+    2. 顔を体と同じスケール・シフトで整列
+    3. 顔のスケールを鼻キーポイントを基準に調整
+    4. 体と顔を合成
+    5. 合成した画像を返す
+    6. 動画の場合は、各フレームを処理して動画を生成
+
+    ※参照画像のポーズがない場合は使用不可
+    """
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -422,51 +431,6 @@ class AlignPOSE_KEYPOINTToReference:
         return (video_tensor,)
 
 
-
-class BoneImageTemporalFixer:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "pose_images": ("IMAGE",),  # [T, H, W, C]
-                "threshold": ("FLOAT", {"default": 0.1, "min": 0.05, "max": 1.0}),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("IMAGE",)
-    FUNCTION = "fix"
-    CATEGORY = "MyPromptTest"
-
-    def fix(self, pose_images, threshold=0.1):
-        T, H, W, C = pose_images.shape
-        smoothed = []
-
-        for t in range(T):
-            current = pose_images[t]
-            prev = pose_images[t - 1] if t > 0 else current
-            next = pose_images[t + 1] if t < T - 1 else current
-
-            # 平均ではなく max を使うことで、細い線にも反応しやすくする
-            current_max = current.max(dim=-1, keepdim=True).values
-            prev_max = prev.max(dim=-1, keepdim=True).values
-            next_max = next.max(dim=-1, keepdim=True).values
-
-            # current が暗い & 両隣が明るい → 消えてるとみなす
-            mask = ((current_max < threshold) & (prev_max > threshold) & (next_max > threshold)).float()
-
-            restored = (prev + next) / 2
-            blended = current * (1 - mask) + restored * mask
-            smoothed.append(blended.unsqueeze(0))
-
-        result = torch.cat(smoothed, dim=0)
-
-        # モノクロ画像なら RGB に拡張（PIL保存の互換性のため）
-        if result.shape[-1] == 1:
-            result = result.repeat(1, 1, 1, 3)
-
-        return (result,)
-
 class RebuiltVideo:
     """
     ポスタリゼーション時間と同様の効果
@@ -540,7 +504,6 @@ class MakeBlackoutFrame:
 
 NODE_CLASS_MAPPINGS = {
     "Rebuilt_Video": RebuiltVideo,
-    "BoneImageTemporalFixer": BoneImageTemporalFixer,
     "AlignPOSE_KEYPOINTToReference": AlignPOSE_KEYPOINTToReference,
     "MakeBlackoutFrame": MakeBlackoutFrame,
 }
