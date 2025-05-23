@@ -87,7 +87,7 @@ HAND_COLORS = {
 }
 
 
-FACE_CIRCLE_SIZE = 5
+FACE_CIRCLE_SIZE = 3
 BODY_CIRCLE_SIZE = 10
 HAND_CIRCLE_SIZE = 5
 
@@ -255,16 +255,17 @@ def scale_with_anchor(img_tensor, keypoints, scale_factor, control_anchor_target
 
     return (canvas, shift) if return_shift else canvas
 
-def custom_scale_around_anchor(tensor, anchor, scale_factor):
+def custom_scale_around_anchor(tensor, anchor,w_factor =1.0, h_factor=1.0):
     """
     Resize face image with anchor 30 : "nose"
     """
     # アンカーの決定
     C, H, W = tensor.shape
-    new_H, new_W = int(H * scale_factor), int(W * scale_factor)
+    new_H, new_W = int(H * h_factor), int(W * w_factor)
     tensor_scaled = F.interpolate(tensor.unsqueeze(0), size=(new_H, new_W), mode="bicubic", align_corners=False)[0]
 
-    new_anchor = anchor * scale_factor
+    # new_anchor = anchor * scale_factor
+    new_anchor = np.array([anchor[0] * w_factor, anchor[1] * h_factor])
 
     # shift の決定
     shift = (anchor - new_anchor).astype(int)
@@ -302,7 +303,9 @@ class AlignPOSE_KEYPOINTToReference:
                 "custom_resize_scale": ("BOOLEAN", {"default": False}),
                 "custom_scaling_factor": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 100.0}),
                 "adjust_face_scale":("BOOLEAN", {"default": True}),
-                "face_scaling_factor": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 100.0}),
+                # "face_scaling_factor": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 100.0}),
+                "face_scaling_h_factor": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 100.0}),
+                "face_scaling_w_factor": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 100.0}),
                 "use_person_input_image": ("INT", {"default": 1, "min": 1, "max": 10}), # n 番目の人間のポーズを使用する
                 "use_person_control_image": ("INT", {"default": 1, "min": 1, "max": 10}), # n 番目の人間のポーズを使用する
                 "draw_hands":("BOOLEAN", {"default": True}),
@@ -316,7 +319,7 @@ class AlignPOSE_KEYPOINTToReference:
 
     def align(self, input_keypoints, input_image, control_keypoints, control_images, 
               adjust_scale=True,custom_resize_scale=False, custom_scaling_factor=1.0, 
-              adjust_face_scale=True, face_scaling_factor=1.0, use_person_input_image=1,use_person_control_image=1,draw_hands=True):
+              adjust_face_scale=True,face_scaling_h_factor=1.0,face_scaling_w_factor=1.0, use_person_input_image=1,use_person_control_image=1,draw_hands=True):
 
         if not adjust_scale:
             return (input_image,) 
@@ -399,7 +402,9 @@ class AlignPOSE_KEYPOINTToReference:
                 if adjust_face_scale:
                     if face_anchor is not None:
                         anchor = face_anchor * scale_factor + body_shift
-                        face_tensor = custom_scale_around_anchor(face_tensor_base, anchor, face_scaling_factor)
+                        h_scale = face_scaling_h_factor
+                        w_scale = face_scaling_w_factor
+                        face_tensor = custom_scale_around_anchor(face_tensor_base, anchor, w_scale, h_scale)
                     else:
                         print(f"[Warning] フレーム {i} に鼻のキーポイントがありません。スキップします。")
                         continue
