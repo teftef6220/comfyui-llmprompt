@@ -112,7 +112,7 @@ class Loadllm:
     RETURN_TYPES = ("LLM_Model",)
     RETURN_NAMES = ("model",)
     FUNCTION = "load"
-    CATEGORY = "MyPromptTest"
+    CATEGORY = "custom/llm_nodes"
 
     def load(self, model_name, precision, device="cuda", quantization="disabled"):
         global current_model
@@ -172,7 +172,7 @@ class GenerateTextWithLLM:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("generated_text",)
     FUNCTION = "generate"
-    CATEGORY = "MyPromptTest"
+    CATEGORY = "custom/llm_nodes"
 
     def generate(self, llm_model, prompt, max_tokens=50, temperature=1.0):
 
@@ -252,7 +252,7 @@ class Qwen2VL:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("generated_text",)
     FUNCTION = "inference"
-    CATEGORY = "MyPromptTest"
+    CATEGORY = "custom/llm_nodes"
 
     def inference(
         self,

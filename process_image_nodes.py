@@ -91,7 +91,7 @@ FACE_CIRCLE_SIZE = 3
 BODY_CIRCLE_SIZE = 10
 HAND_CIRCLE_SIZE = 5
 
-
+MAX_RESOLUTION = 8192
 
 def get_point(pose, index, key_name="pose_keypoints_2d"):
     """
@@ -324,7 +324,7 @@ class AlignPOSE_KEYPOINTToReference:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("aligned_video",)
     FUNCTION = "align"
-    CATEGORY = "MyPromptTest"
+    CATEGORY = "custom/video_edit_nodes"
 
     def align(self, input_keypoints, input_image, control_keypoints, control_images, 
               adjust_scale=True,custom_resize_scale=False, custom_scaling_factor=1.0, 
@@ -448,7 +448,7 @@ class RebuiltVideo:
     RETURN_TYPES = ("IMAGE", "INT", "INT",)
     RETURN_NAMES = ("IMAGE", "width", "height",)
     FUNCTION = "rebuilt"
-    CATEGORY = "MyPromptTest"
+    CATEGORY = "custom/video_edit_nodes"
 
     def rebuilt(self, image, repeat_each_frame):
         # image: [B, H, W, C] (B = number of frames)
@@ -473,7 +473,7 @@ class MakeBlackoutFrame:
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "blackout"
 
-    CATEGORY = "custom/video"
+    CATEGORY = "custom/video_edit_nodes"
 
     def blackout(self, video_tensor, blackout_ratio, num_blocks):
         """
@@ -502,10 +502,48 @@ class MakeBlackoutFrame:
 
         return (blackout_tensor,)
 
+        MAX_RESOLUTION = 8192
+
+
+class SDXLWidthAndHeight:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": (
+                    "INT",
+                    {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 8},
+                ),
+                "height": (
+                    "INT",
+                    {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 8},
+                ),
+                "multiplier": (
+                    "INT",
+                    {"default": 4, "min": 1, "max": 8, "step": 1},
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("INT", "INT", "INT", "INT")
+    FUNCTION = "convert"
+
+    CATEGORY = "custom/video_edit_nodes"
+
+    def convert(self, width, height, multiplier):
+        return (
+            int(width),
+            int(height),
+            int(width * multiplier),
+            int(height * multiplier),
+        )
+
+
 NODE_CLASS_MAPPINGS = {
     "Rebuilt_Video": RebuiltVideo,
     "AlignPOSE_KEYPOINTToReference": AlignPOSE_KEYPOINTToReference,
     "MakeBlackoutFrame": MakeBlackoutFrame,
+    "SDXL_Width_And_Height": SDXLWidthAndHeight,
 }
 
 
